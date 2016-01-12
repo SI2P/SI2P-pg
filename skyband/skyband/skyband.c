@@ -22,6 +22,7 @@
 #include "sky_bucket_list.h"
 #include "sky_domi_list.h"
 #include "sky_hashtable.h"
+#include <regex.h>
 
 
 PG_MODULE_MAGIC;
@@ -36,7 +37,7 @@ int CmpFunc(const void *p1, const void *p2);
 void QsortStwh(int n);
 void ThicknessWarehouse(void);
 void Init(void);
-
+char * parseCommand(const char * cmd);
 
 int sky_k;                  /* The k value that in skyband query */
 int sky_dim;                /* The dimension of point in skyband query */
@@ -69,6 +70,12 @@ typedef struct ret_struct {
     double **data_pointer;
 } ret_struct;
 
+int *dominating_type; //domination types on each dimension to compare, 0 for min preferred, 1 for max preferred
+//name of each column considered in skyband calculation, these column names are followed by max/min in the first parameter
+char ** colum_names; 
+int colum_count;
+int * column_offset; //offset of columns
+int * cmp_type;
 /*
  * Function: IsP1DominateP2
  * -------------------
@@ -97,11 +104,20 @@ bool IsP1DominateP2(SkyPoint *p1, SkyPoint *p2) {
         is_null_x2 = (*(p2->bitmap + i)) == '0';
         if (is_null_x1 || is_null_x2) {         /* If p1 or p2's bitmap is '0', which means incomplete data */
             cnt_small_or_equal++;
-        } else {                                /* Else just do comparation */
-            if (x1 <= x2) cnt_small_or_equal++;
-            if (x1 < x2) is_small = 1;
+        } else { 
+            if(0 == cmp_type[i]){                               /* Else just do comparation */
+                if (x1 <= x2) cnt_small_or_equal++;
+                if (x1 < x2) is_small = 1;
+            }
+            else{
+                if (x1 >= x2) cnt_small_or_equal++;
+                if (x1 > x2) is_small = 1;
+            }
+
         }
+            
     }
+
     if ((cnt_small_or_equal == dim) && is_small)        /* All dimension not larger than p2 and exist one dimension is smaller than p2 */
         return 1;
     else
@@ -189,6 +205,7 @@ void ThicknessWarehouse(void) {
     SkyPoint *tmp_point2 = NULL;
     SkyPoint *tmp_next;
     SkyPoint **tmp_array;
+    int skip_count = 0;
 
     /* Create start point of Stwh, Ses and Sg */
     stwh_head = StartPoint(&stwh_size, &stwh_head, &stwh_tail, sky_dim);
@@ -212,6 +229,19 @@ void ThicknessWarehouse(void) {
     while (tmp_next != NULL) {
         tmp_point = tmp_next;
         tmp_next = tmp_point->next;
+        int missing_count = 0;
+        for (int i = 0; i < sky_dim; ++i)
+        {
+            if (tmp_point->bitmap[i] == '0')
+            {
+                missing_count++;
+            }
+        }
+        if(missing_count  == sky_dim){
+            skip_count++;
+            continue;
+        }
+        if(tmp_point->bitmap)
         tmp_listnode = Find(tmp_point->bitmap, hash_table, sky_dim);             /* Find the list of nodes in hashtable according to bimap */
         if (tmp_listnode == NULL) {
             tmp_bucket = (SkyBucket *)palloc(sizeof(SkyBucket));        /* If not exist, then we create a node for this bitmap in hashtable */
@@ -222,6 +252,7 @@ void ThicknessWarehouse(void) {
         }
         PushPoint(tmp_point, &tmp_bucket->data_size, &tmp_bucket->data_tail);       /* Push point into the bucket of this bitmap */
     }
+
 
 
     //////////////////////////////////////////////////////////////////////////
@@ -447,11 +478,12 @@ Datum SkybandQuery(PG_FUNCTION_ARGS) {
         if (sky_k < 1)
             sky_k = 1;
 
+        char * new_cmd = parseCommand(command);
         /* open internal connection */
         SPI_connect();
 
         /* run the SQL scommand, 0 for no limit of returned row number */
-        ret = SPI_exec(command, 0);
+        ret = SPI_exec(new_cmd, 0);
 
         /* save the number of rows */
         sky_cnt = SPI_processed;
@@ -470,14 +502,33 @@ Datum SkybandQuery(PG_FUNCTION_ARGS) {
             tupdesc = SPI_tuptable->tupdesc;
             tuptable = SPI_tuptable;
 
+            cmp_type = (int *) palloc(sizeof(int) * 100);
+            column_offset = (int *) palloc(sizeof(int) *100);
+
             /* get the number of datatype that can be used in skyband query */
             for (i = 1; i <= tupdesc->natts; ++i) {
                 type_name = SPI_gettype(tupdesc, i);
-                if (strcmp(type_name, "int4") == 0 || strcmp(type_name, "int2") == 0 ||
-                    strcmp(type_name, "float4") == 0 || strcmp(type_name, "float8") == 0) {
-                    //elog(INFO, "Type: %s", type_name);
-                    cnt_dim++;
+                char *col_name = SPI_fname(tupdesc, i);
+                //elog(INFO, "col name: %s", col_name);
+
+                for(int k=0; k<colum_count; k++){
+                    if(strcmp(col_name, colum_names[k]) == 0){
+                        if (strcmp(type_name, "int4") == 0 || strcmp(type_name, "int2") == 0 ||
+                                strcmp(type_name, "float4") == 0 || strcmp(type_name, "float8") == 0) {
+                                      
+
+                            elog(INFO, "selected col: %s", col_name);
+                            cmp_type[cnt_dim] = dominating_type[k];
+                            column_offset[cnt_dim] = i;
+                            ++cnt_dim;
+                            break;
+                        }
+                        else{
+                            elog(INFO, "%s is not int or float", type_name);
+                        }
+                    }
                 }
+              
             }
 
             sky_dim = cnt_dim;                                                  /* dimension */
@@ -486,6 +537,7 @@ Datum SkybandQuery(PG_FUNCTION_ARGS) {
 
             tmp_pointer = (double **)palloc(sizeof(double *) * sky_cnt);
 
+            elog(INFO, "start 1");
             for (i = 0; i < sky_cnt; i++) {
                 int cnt_dim = 0;
                 tmp_head = StartPoint(&tmp_size, &tmp_head, &tmp_tail, sky_dim);      /* Create temp input point */
@@ -496,19 +548,19 @@ Datum SkybandQuery(PG_FUNCTION_ARGS) {
 
                 tuple = tuptable->vals[i];
 
-                for (j = 1; j <= tupdesc->natts; j++) {                     /* Input point's data from tuple */
+                for (int k = 0; k < sky_dim; k++) {                     /* Input point's data from tuple */
+                    j = column_offset[k];
                     type_name = SPI_gettype(tupdesc, j);
-                    if (strcmp(type_name, "int4") == 0 || strcmp(type_name, "int2") == 0 ||
-                        strcmp(type_name, "float4") == 0 || strcmp(type_name, "float8") == 0) {
-                        if (SPI_getvalue(tuple, tupdesc, j) == NULL) {                      /* If data is NULL */
-                            *(*(tmp_head->data) + cnt_dim) = 0;
-                            *(tmp_head->bitmap + cnt_dim) = '0';
-                        } else {                                                            /* If data is not NULL */
-                            *(*(tmp_head->data) + cnt_dim) = atof(SPI_getvalue(tuple, tupdesc, j));
-                            *(tmp_head->bitmap + cnt_dim) = '1';
-                        }
-                        cnt_dim++;
+                   if (SPI_getvalue(tuple, tupdesc, j) == NULL) {                      /* If data is NULL */
+                        *(*(tmp_head->data) + cnt_dim) = 0;
+                        *(tmp_head->bitmap + cnt_dim) = '0';
+                    } else {                                                           /* If data is not NULL */
+                       
+                        *(*(tmp_head->data) + cnt_dim) = atof(SPI_getvalue(tuple, tupdesc, j));
+                        *(tmp_head->bitmap + cnt_dim) = '1';
                     }
+                    cnt_dim++;
+                    
                 }
                 /*elog(INFO, "Data Info: %s", buf);*/
 
@@ -619,3 +671,65 @@ Datum SkybandQuery(PG_FUNCTION_ARGS) {
         SRF_RETURN_DONE(funcctx);    // if all printed
     }
 }
+
+
+char * parseCommand(const char * cmd){
+    int cmd_len = strlen(cmd);
+    char * new_cmd = (char *)palloc((cmd_len + 1) * sizeof(char));
+    unsigned int new_cmd_index = 0;
+    unsigned int current_index = 0;
+    char * regexString = "([a-zA-Z_0-9]+)([ \t]+(max|min))[ \t]*";
+    size_t maxMatches = 100;
+    colum_names = palloc(100*sizeof(char *));
+    size_t maxGroups = 5;
+    dominating_type = palloc(sizeof(int) * 100);
+    
+    regex_t regexCompiled;
+    regmatch_t groupArray[maxGroups];
+    if (regcomp(&regexCompiled, regexString, REG_EXTENDED))
+    {
+        printf("Could not compile regular expression.\n");
+        return NULL;
+    };
+    
+    unsigned int m = 0;
+    char * cursor = cmd;
+    for (m = 0; m < maxMatches; m ++)
+    {
+        if (regexec(&regexCompiled, cursor, maxGroups, groupArray, 0))
+            break;  // No more matches
+        
+        //unsigned int offset = groupArray[0].rm_eo;
+        unsigned int start = groupArray[2].rm_so;
+        unsigned int end = groupArray[2].rm_eo;
+        unsigned int colum_len = groupArray[1].rm_eo - groupArray[1].rm_so;
+        colum_names[m] = palloc(colum_len + 1);
+        memcpy(colum_names[m], &cursor[groupArray[1].rm_so], colum_len);
+        colum_names[m][colum_len] = '\0';
+        elog(INFO, "%s\n", colum_names[m]);
+        //elog(INFO, "%c\n", cursor[groupArray[3].rm_so+1]);
+        dominating_type[m] = tolower(cursor[groupArray[3].rm_so+1])=='i'? 0:1;
+
+        for(int i=0; i < start; i++) {
+            new_cmd[new_cmd_index++] = cmd[current_index++];
+        }
+        current_index += end - start;
+        
+        cursor += end;
+    }
+    colum_count = m;
+    if(colum_count < 1){
+        elog(ERROR, "Please specify preference over column values(max or min)");
+    }
+    
+    regfree(&regexCompiled);
+    while (current_index < cmd_len) {
+        new_cmd[new_cmd_index++] = cmd[current_index++];
+    }
+    new_cmd[new_cmd_index] = '\0';
+    elog(INFO, "new command: %s", new_cmd);
+    return new_cmd;
+}
+
+
+

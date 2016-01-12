@@ -1,3 +1,4 @@
+PG_CPPFLAGS = --std=c99
 MODULE_big = skyband
 OBJS = skyband.o sky_bucket_list.o sky_point_list.o sky_hashtable.o sky_domi_list.o
 DATA_built = skyband.sql

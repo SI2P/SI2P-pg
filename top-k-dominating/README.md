@@ -81,7 +81,7 @@ postgres=> select * from tkd;
 
 Now since we have created tkd function in the server, we can run tkd query as following format:
 ~~~sql
-postgres=> select * from tkd('select name,d1,d2,d3,d4 from tkd',3,0) as (name text,d1 int, d2 int, d3 int, d4 int);
+postgres=> select * from tkd('select name,d1 min,d2 min,d3 min,d4 min from tkd',3,0) as (name text,d1 int, d2 int, d3 int, d4 int);
  name | d1 | d2 | d3 | d4
 ------+----+----+----+----
  C2   |  2 |    |    |  1
@@ -93,12 +93,12 @@ postgres=> select * from tkd('select name,d1,d2,d3,d4 from tkd',3,0) as (name te
 
 Note that tkd function needs three parameters:
 
-1. the selection clause, can not be NULL (text type)
+1. the selection clause, which specifies the dataset. Note that the 'min' after the attribute name is used to denote
+smaller values are preferred. Use 'max' otherwise.
 2. k (integer type)
-3. dominating method(integer type). Zero indicates a dominates b if a is smaller than b, non-zero number indicates a dominates b if a is larger than b. Notice that this parameter is optional, leaving unspecified indicating zero 
-
 (ps: you should also provide the output format using as clause, otherwise it won't work).
 
 ## Contact us
 1. If you have any question about this paper, you can contact Mr. Gao: gaoyj@zju.edu.cn
 2. The projet is coded by Weida Pan (Iykon), feel free to ask any questions: iykoncoc001@gmail.com
+3. Some modifications are made by [Hawaiyon](https://github.com/Hawaiyon)
